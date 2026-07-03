@@ -50,7 +50,10 @@ def extract(payload: ExtractRequest):
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": "best[ext=mp4]/best",
+        # acodec/vcodec != "none" ensures we only pick formats that already
+        # have both audio and video combined (progressive), since we can't
+        # merge separate streams without actually downloading server-side.
+        "format": "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best",
         "noplaylist": True,
     }
 
