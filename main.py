@@ -38,6 +38,18 @@ DEFAULT_HEADERS = {
 }
 
 
+def _referer_for(url: str) -> str:
+    if "tiktok" in url:
+        return "https://www.tiktok.com/"
+    if "instagram" in url:
+        return "https://www.instagram.com/"
+    if "youtube" in url or "youtu.be" in url:
+        return "https://www.youtube.com/"
+    if "facebook" in url:
+        return "https://www.facebook.com/"
+    return url
+
+
 def _extract(url: str):
     ydl_opts = {
         "quiet": True,
@@ -76,7 +88,15 @@ def _extract(url: str):
     if not direct_url:
         raise HTTPException(status_code=422, detail="Could not find a downloadable video URL for this link")
 
-    headers = matched_headers or info.get("http_headers") or DEFAULT_HEADERS
+    # Merge in priority order: our safe defaults < yt-dlp's top-level
+    # headers < yt-dlp's format-specific headers. Then guarantee a Referer
+    # is always present, since several CDNs (TikTok especially) reject
+    # requests missing it even when User-Agent is fine.
+    headers = dict(DEFAULT_HEADERS)
+    headers.update(info.get("http_headers") or {})
+    headers.update(matched_headers or {})
+    headers.setdefault("Referer", _referer_for(url))
+
     return info, direct_url, headers
 
 
