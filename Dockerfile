@@ -12,8 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Cloud Run injects PORT at runtime; 8080 is the default/expected value
+# Render (and Cloud Run) inject their own PORT value at runtime.
+# Default to 8080 only if nothing is provided (e.g. running locally).
 ENV PORT=8080
-   EXPOSE 8080
+EXPOSE 8080
 
-   CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
