@@ -1,8 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Dict
 import yt_dlp
+import requests
+import re
 
 app = FastAPI(title="Video Extractor API")
 
@@ -35,28 +38,14 @@ DEFAULT_HEADERS = {
 }
 
 
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
-
-@app.post("/extract", response_model=ExtractResponse)
-def extract(payload: ExtractRequest):
-    url = payload.url.strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
+def _extract(url: str):
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        # acodec/vcodec != "none" ensures we only pick formats that already
-        # have both audio and video combined (progressive), since we can't
-        # merge separate streams without actually downloading server-side.
         "format": "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best",
         "noplaylist": True,
     }
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -88,6 +77,21 @@ def extract(payload: ExtractRequest):
         raise HTTPException(status_code=422, detail="Could not find a downloadable video URL for this link")
 
     headers = matched_headers or info.get("http_headers") or DEFAULT_HEADERS
+    return info, direct_url, headers
+
+
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+
+@app.post("/extract", response_model=ExtractResponse)
+def extract(payload: ExtractRequest):
+    url = payload.url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    info, direct_url, headers = _extract(url)
 
     return ExtractResponse(
         title=info.get("title") or "Untitled",
@@ -96,4 +100,52 @@ def extract(payload: ExtractRequest):
         direct_url=direct_url,
         ext=info.get("ext") or "mp4",
         headers=headers,
+    )
+
+
+@app.post("/download")
+def download(payload: ExtractRequest):
+    """
+    Streams the actual video bytes through this server instead of handing
+    the client a raw CDN link. This is required because CDN links (YouTube
+    especially) are IP-locked to whichever server requested them — a
+    phone on a different network gets a 403 if it tries to fetch the raw
+    link directly. Re-extracting here (same request, same IP) and proxying
+    the bytes avoids that entirely.
+    """
+    url = payload.url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    info, direct_url, headers = _extract(url)
+    ext = info.get("ext") or "mp4"
+    raw_title = info.get("title") or "video"
+    safe_title = re.sub(r"[^a-zA-Z0-9]", "_", raw_title)
+    filename = f"{safe_title}.{ext}"
+
+    try:
+        upstream = requests.get(direct_url, headers=headers, stream=True, timeout=30)
+        upstream.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Could not fetch video from source: {str(e)}")
+
+    def iterfile():
+        try:
+            for chunk in upstream.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    response_headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    content_length = upstream.headers.get("Content-Length")
+    if content_length:
+        response_headers["Content-Length"] = content_length
+
+    return StreamingResponse(
+        iterfile(),
+        media_type=f"video/{ext}",
+        headers=response_headers,
     )
